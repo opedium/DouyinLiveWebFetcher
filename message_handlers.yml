@@ -1,73 +1,89 @@
-# true = 开启
-# false = 关闭
+# 抖音直播数据抓取配置文件
+# true = 开启，false = 关闭
 
-live_id: '87022195945' #房间号
+
+heartbeat_interval: 5 # 心跳包发送间隔（秒）
+retry_on_failure: true # 是否在连接失败时自动重试
+max_retries: 3 # 最大重试次数
+retry_delay_seconds: 10 # 每次重试之间的等待时间（秒）
+
+logging:
+  folder: 'logs' # 日志文件保存目录
+  format: 'csv'  # 日志文件格式（目前仅支持 CSV）
+  rotate_daily: true # 是否按天生成新的日志文件
+  include_timestamp: true # 是否在日志中包含时间戳
 
 WebcastChatMessage:
-  enabled: true
-  handler: _parseChatMsg
+  enabled: true # 是否处理聊天消息
+  log_to_csv: false # 是否将聊天消息记录到 CSV 文件
+  show_user_id: false # 是否显示用户 ID
+  show_fans_club: true # 是否显示粉丝团等级
+  show_pay_grade: true # 是否显示用户等级（付费等级）
+  handler: _parseChatMsg 
   comment: 聊天消息
 
 WebcastGiftMessage:
-  enabled: true
-  handler: _parseGiftMsg
+  enabled: true # 是否处理礼物消息
+  track_total_diamonds: true # 是否统计累计收到的钻石数
+  log_to_csv: true # 是否将礼物消息记录到 CSV 文件
+  show_gift_value: true # 是否显示礼物价值（钻石数）
+  handler: _parseGiftMsg 
   comment: 礼物消息
 
 WebcastLikeMessage:
-  enabled: true
-  handler: _parseLikeMsg
-  track_total_diamonds: false #显示总钻数
+  enabled: true # 是否处理点赞消息
+  track_total_diamonds: true # 是否统计点赞带来的钻石数（通常为否）
+  handler: _parseLikeMsg 
   comment: 点赞消息
 
-
 WebcastMemberMessage:
-  enabled: true
-  handler: _parseMemberMsg
+  enabled: true # 是否处理用户进入直播间的消息
+  handler: _parseMemberMsg 
   comment: 进入直播间消息
 
 WebcastSocialMessage:
-  enabled: true
-  handler: _parseSocialMsg
+  enabled: true # 是否处理关注主播的消息
+  handler: _parseSocialMsg 
   comment: 关注消息
 
 WebcastRoomUserSeqMessage:
-  enabled: true
-  handler: _parseRoomUserSeqMsg
-  record_viewer_count: true #记录在线和场观
-  log_interval_seconds: 300 #每隔多少时间记录一次,单位为秒(s)
+  enabled: true # 是否处理直播间观众统计信息
+  record_viewer_count: true # 是否记录当前在线人数和累计观看人数
+  log_interval_seconds: 300 # 每隔多少秒记录一次统计数据
+  handler: _parseRoomUserSeqMsg 
   comment: 直播间统计
 
 WebcastFansclubMessage:
-  enabled: true
-  handler: _parseFansclubMsg
+  enabled: true # 是否处理粉丝团相关消息
+  handler: _parseFansclubMsg 
   comment: 粉丝团消息
 
 WebcastControlMessage:
-  enabled: true
-  handler: _parseControlMsg
+  enabled: true # 是否处理直播间状态变更消息
+  handler: _parseControlMsg 
   comment: 直播间状态消息
 
 WebcastEmojiChatMessage:
-  enabled: true
-  handler: _parseEmojiChatMsg
+  enabled: true # 是否处理聊天表情包消息
+  handler: _parseEmojiChatMsg 
   comment: 聊天表情包消息
 
 WebcastRoomStatsMessage:
-  enabled: true
-  handler: _parseRoomStatsMsg
+  enabled: true # 是否处理直播间统计信息
+  handler: _parseRoomStatsMsg 
   comment: 直播间统计信息
 
 WebcastRoomMessage:
-  enabled: true
-  handler: _parseRoomMsg
+  enabled: true # 是否处理直播间基础信息
+  handler: _parseRoomMsg 
   comment: 直播间信息
 
 WebcastRoomRankMessage:
-  enabled: true
-  handler: _parseRankMsg
+  enabled: true # 是否处理直播间排行榜信息
+  handler: _parseRankMsg 
   comment: 直播间排行榜信息
 
 WebcastRoomStreamAdaptationMessage:
-  enabled: true
-  handler: _parseRoomStreamAdaptationMsg
+  enabled: true # 是否处理直播间流配置变更消息
+  handler: _parseRoomStreamAdaptationMsg 
   comment: 直播间流配置
