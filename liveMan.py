@@ -135,23 +135,15 @@ class DouyinLiveWebFetcher:
             return {
                 msg_type: getattr(self, cfg["handler"])
                 for msg_type, cfg in self.handler_config.items()
-                if cfg.get("enabled", False)
+                if isinstance(cfg, dict) and cfg.get("enabled", False)
             }
         except Exception as e:
             print(f"【配置加载失败】{e}")
             self.handler_config = {}
             return {}
 
-
-    
-    def __init__(self, live_id, abogus_file='a_bogus.js'):
-        """
-        直播间弹幕抓取对象
-        :param live_id: 直播间的直播id，打开直播间web首页的链接如：https://live.douyin.com/261378947940，
-                        其中的261378947940即是live_id
-        """
+    def __init__(self, live_id, abogus_file='a_bogus.js', config_path="message_handlers.yml"):
         self.abogus_file = abogus_file
-        self.total_diamonds = 0
         self.__ttwid = None
         self.__room_id = None
         self.session = requests.Session()
@@ -162,7 +154,27 @@ class DouyinLiveWebFetcher:
         self.headers = {
             'User-Agent': self.user_agent
         }
-    
+        # 加载配置
+        with open(config_path, "r", encoding="utf-8") as f:
+            self.handler_config = yaml.safe_load(f)
+        self.total_diamonds = 0
+
+        # 运行时设置
+        self.heartbeat_interval = self.handler_config.get("heartbeat_interval", 5)
+        self.retry_on_failure = self.handler_config.get("retry_on_failure", True)
+        self.max_retries = self.handler_config.get("max_retries", 3)
+        self.retry_delay_seconds = self.handler_config.get("retry_delay_seconds", 10)
+
+        self.logging_cfg = self.handler_config.get("logging", {})
+        self.log_folder = self.logging_cfg.get("folder", "logs")
+        self.log_format = self.logging_cfg.get("format", "csv")
+        self.rotate_daily = self.logging_cfg.get("rotate_daily", True)
+        self.include_timestamp = self.logging_cfg.get("include_timestamp", True)
+
+        os.makedirs(self.log_folder, exist_ok=True)
+
+
+            
     def start(self):
         self._connectWebSocket()
     
@@ -193,7 +205,7 @@ class DouyinLiveWebFetcher:
     def room_id(self):
         """
         根据直播间的地址获取到真正的直播间roomId，有时会有错误，可以重试请求解决
-        :return:room_id
+        :return: room_id
         """
         if self.__room_id:
             return self.__room_id
@@ -208,14 +220,14 @@ class DouyinLiveWebFetcher:
         except Exception as err:
             print("【X】Request the live room url error: ", err)
         else:
-            match = re.search(r'"roomId"\s*:\s*"(\d+)"', response.text)
-
+            match = re.search(r'roomId\\":\\"(\d+)\\"', response.text)
             if match is None or len(match.groups()) < 1:
                 print("【X】No match found for roomId")
             
             self.__room_id = match.group(1)
             
             return self.__room_id
+
     
     def get_ac_nonce(self):
         """
@@ -282,45 +294,57 @@ class DouyinLiveWebFetcher:
         """
         连接抖音直播间websocket服务器，请求直播间数据
         """
-        wss = ("wss://webcast100-ws-web-lq.douyin.com/webcast/im/push/v2/?app_name=douyin_web"
-               "&version_code=180800&webcast_sdk_version=1.0.14-beta.0"
-               "&update_version_code=1.0.14-beta.0&compress=gzip&device_platform=web&cookie_enabled=true"
-               "&screen_width=1536&screen_height=864&browser_language=zh-CN&browser_platform=Win32"
-               "&browser_name=Mozilla"
-               "&browser_version=5.0%20(Windows%20NT%2010.0;%20Win64;%20x64)%20AppleWebKit/537.36%20(KHTML,"
-               "%20like%20Gecko)%20Chrome/126.0.0.0%20Safari/537.36"
-               "&browser_online=true&tz_name=Asia/Shanghai"
-               "&cursor=d-1_u-1_fh-7392091211001140287_t-1721106114633_r-1"
-               f"&internal_ext=internal_src:dim|wss_push_room_id:{self.room_id}|wss_push_did:7319483754668557238"
-               f"|first_req_ms:1721106114541|fetch_time:1721106114633|seq:1|wss_info:0-1721106114633-0-0|"
-               f"wrds_v:7392094459690748497"
-               f"&host=https://live.douyin.com&aid=6383&live_id=1&did_rule=3&endpoint=live_pc&support_wrds=1"
-               f"&user_unique_id=7319483754668557238&im_path=/webcast/im/fetch/&identity=audience"
-               f"&need_persist_msg_count=15&insert_task_id=&live_reason=&room_id={self.room_id}&heartbeatDuration=0")
-        
-        signature = generateSignature(wss)
-        wss += f"&signature={signature}"
-        
-        headers = {
-            "cookie": f"ttwid={self.ttwid}",
-            'user-agent': self.user_agent,
-        }
-        self.ws = websocket.WebSocketApp(wss,
-                                         header=headers,
-                                         on_open=self._wsOnOpen,
-                                         on_message=self._wsOnMessage,
-                                         on_error=self._wsOnError,
-                                         on_close=self._wsOnClose)
-        try:
-            self.ws.run_forever()
-        except Exception:
-            self.stop()
-            raise
-    
+        attempt = 0
+        while attempt < self.max_retries:
+            try:
+                wss = ("wss://webcast100-ws-web-lq.douyin.com/webcast/im/push/v2/?app_name=douyin_web"
+                    "&version_code=180800&webcast_sdk_version=1.0.14-beta.0"
+                    "&update_version_code=1.0.14-beta.0&compress=gzip&device_platform=web&cookie_enabled=true"
+                    "&screen_width=1536&screen_height=864&browser_language=zh-CN&browser_platform=Win32"
+                    "&browser_name=Mozilla"
+                    "&browser_version=5.0%20(Windows%20NT%2010.0;%20Win64;%20x64)%20AppleWebKit/537.36%20(KHTML,"
+                    "%20like%20Gecko)%20Chrome/126.0.0.0%20Safari/537.36"
+                    "&browser_online=true&tz_name=Asia/Shanghai"
+                    "&cursor=d-1_u-1_fh-7392091211001140287_t-1721106114633_r-1"
+                    f"&internal_ext=internal_src:dim|wss_push_room_id:{self.room_id}|wss_push_did:7319483754668557238"
+                    f"|first_req_ms:1721106114541|fetch_time:1721106114633|seq:1|wss_info:0-1721106114633-0-0|"
+                    f"wrds_v:7392094459690748497"
+                    f"&host=https://live.douyin.com&aid=6383&live_id=1&did_rule=3&endpoint=live_pc&support_wrds=1"
+                    f"&user_unique_id=7319483754668557238&im_path=/webcast/im/fetch/&identity=audience"
+                    f"&need_persist_msg_count=15&insert_task_id=&live_reason=&room_id={self.room_id}&heartbeatDuration=0")
+
+                signature = generateSignature(wss)
+                wss += f"&signature={signature}"
+
+                headers = {
+                    "cookie": f"ttwid={self.ttwid}",
+                    'user-agent': self.user_agent,
+                }
+
+                self.ws = websocket.WebSocketApp(
+                    wss,
+                    header=headers,
+                    on_open=self._wsOnOpen,
+                    on_message=self._wsOnMessage,
+                    on_error=self._wsOnError,
+                    on_close=self._wsOnClose
+                )
+
+                print(f"【连接尝试】第 {attempt + 1} 次连接 WebSocket...")
+                self.ws.run_forever()
+                break  # success, exit loop
+
+            except Exception as e:
+                print(f"【连接失败】{e}")
+                attempt += 1
+                if not self.retry_on_failure or attempt >= self.max_retries:
+                    print("【终止】已达到最大重试次数或关闭重试功能。")
+                    self.stop()
+                    break
+                print(f"【重试中】将在 {self.retry_delay_seconds} 秒后重试...")
+                time.sleep(self.retry_delay_seconds)
+
     def _sendHeartbeat(self):
-        """
-        发送心跳包
-        """
         while True:
             try:
                 heartbeat = PushFrame(payload_type='hb').SerializeToString()
@@ -330,7 +354,8 @@ class DouyinLiveWebFetcher:
                 print("【X】心跳包检测错误: ", e)
                 break
             else:
-                time.sleep(5)
+                time.sleep(self.heartbeat_interval)
+
     
     def _wsOnOpen(self, ws):
         """
@@ -371,6 +396,19 @@ class DouyinLiveWebFetcher:
                 except Exception as e:
                     print(f"【处理失败】{method}: {e}")
 
+    def log_message(self, filename, headers, row):
+        if self.rotate_daily:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            filename = f"{date_str}_{filename}"
+        filepath = os.path.join(self.log_folder, f"{filename}.{self.log_format}")
+
+        file_exists = os.path.isfile(filepath)
+        with open(filepath, mode="a", newline="", encoding="utf-8-sig") as file:
+            writer = csv.writer(file)
+            if not file_exists:
+                writer.writerow(headers)
+            writer.writerow(row)
+
     
     def _wsOnError(self, ws, error):
         print("WebSocket error: ", error)
@@ -387,22 +425,51 @@ class DouyinLiveWebFetcher:
             user_id = message.user.id
             content = message.content
 
-            # 解析粉丝团以及财富等级
+            cfg = self.handler_config.get("WebcastChatMessage", {})
+            show_user_id = cfg.get("show_user_id", True)
+            show_fans_club = cfg.get("show_fans_club", True)
+            show_pay_grade = cfg.get("show_pay_grade", True)
+            log_to_csv = cfg.get("log_to_csv", False)
+
             fans_club = None
             pay_grade = None
             if message.user:
-                if hasattr(message.user, 'fans_club') and message.user.fans_club and hasattr(message.user.fans_club, 'data') and message.user.fans_club.data:
-                    fans_club = message.user.fans_club.data.level #粉丝团等级
-                if hasattr(message.user, 'pay_grade') and message.user.pay_grade:
-                    pay_grade = message.user.pay_grade.level #财富等级
-            if user_id == 111111: #如果匿名，不显示id
-                print(f"【聊天msg】[{fans_club}] [{pay_grade}]|{user_name}: {content}")
-            else: 
-                print(f"【聊天msg】[{fans_club}] [{pay_grade}]|[{user_id}]{user_name}: {content}")
+                if show_fans_club and hasattr(message.user, 'fans_club') and message.user.fans_club and hasattr(message.user.fans_club, 'data') and message.user.fans_club.data:
+                    fans_club = message.user.fans_club.data.level
+                if show_pay_grade and hasattr(message.user, 'pay_grade') and message.user.pay_grade:
+                    pay_grade = message.user.pay_grade.level
+
+            # 显示记录
+            display_parts = []
+            if show_fans_club:
+                display_parts.append(f"[{fans_club}]")
+            if show_pay_grade:
+                display_parts.append(f"[{pay_grade}]")
+            if show_user_id and user_id != 111111:
+                display_parts.append(f"[{user_id}]{user_name}")
+            else:
+                display_parts.append(user_name)
+
+            print(f"【聊天msg】{' '.join(display_parts)}: {content}")
+
+            # CSV 记录
+            if log_to_csv:
+                headers = ["timestamp", "user_id", "user_name", "fans_club", "pay_grade", "content"]
+                row = [
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S") if self.include_timestamp else "",
+                    user_id if show_user_id else "",
+                    user_name,
+                    fans_club if show_fans_club else "",
+                    pay_grade if show_pay_grade else "",
+                    content
+                ]
+                self.log_message("chat_log", headers, row)
+
+
             return message
         except Exception as e:
             print(f"【聊天msg】解析失败: {e}")
-            return None #如果失败fallback
+            return None
 
 
     def _parseGiftMsg(self, payload):
@@ -414,6 +481,11 @@ class DouyinLiveWebFetcher:
             gift_cnt = message.combo_count
             gift_value = message.gift.diamond_count * gift_cnt
 
+            cfg = self.handler_config.get("WebcastGiftMessage", {})
+            track_total = cfg.get("track_total_diamonds", False)
+            log_to_csv = cfg.get("log_to_csv", False)
+            show_gift_value = cfg.get("show_gift_value", True)
+
             fans_club = None
             pay_grade = None
             if message.user:
@@ -422,16 +494,33 @@ class DouyinLiveWebFetcher:
                 if hasattr(message.user, 'pay_grade') and message.user.pay_grade:
                     pay_grade = message.user.pay_grade.level
 
-            print(f"【礼物msg】[{fans_club}] [{pay_grade}]|{user_name} 送出了 {gift_name}x{gift_cnt} (价值: {gift_value})")
+            # 显示
+            value_str = f"(价值: {gift_value})" if show_gift_value else ""
+            print(f"【礼物msg】[{fans_club}] [{pay_grade}]|{user_name} 送出了 {gift_name}x{gift_cnt} {value_str}")
 
-            cfg = self.handler_config.get("WebcastGiftMessage", {})
-            if cfg.get("track_total_diamonds", False):
+            # 总钻
+            if track_total:
                 self.total_diamonds += gift_value
                 print(f"💎 当前累计钻石数: {self.total_diamonds}")
+
+            # csv记录
+            if log_to_csv:
+                headers = ["timestamp", "user_name", "gift_name", "gift_count", "gift_value", "fans_club", "pay_grade"]
+                row = [
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S") if self.include_timestamp else "",
+                    user_name,
+                    gift_name,
+                    gift_cnt,
+                    gift_value if show_gift_value else "",
+                    fans_club,
+                    pay_grade
+                ]
+                self.log_message("gift_log", headers, row)
 
             return message
         except Exception as e:
             print(f"【礼物msg】解析失败: {e}")
+            return None
             return None
 
     def _parseLikeMsg(self, payload):
@@ -483,21 +572,24 @@ class DouyinLiveWebFetcher:
 
         cfg = self.handler_config.get("WebcastRoomUserSeqMessage", {})
         interval = cfg.get("log_interval_seconds", 300)
+        log_to_csv = cfg.get("log_to_csv", False)
 
         if hasattr(self, "last_logged_time") and (now - self.last_logged_time).total_seconds() < interval:
             return
         self.last_logged_time = now
 
-        if cfg.get("record_viewer_count", False):
-            date_str = now.strftime("%Y-%m-%d")
-            csv_file = f"{date_str}_viewer_count.csv"
-            file_exists = os.path.isfile(csv_file)
-
-            with open(csv_file, mode="a", newline="", encoding="utf-8") as file:
-                writer = csv.writer(file)
-                if not file_exists:
-                    writer.writerow(["timestamp", "current_viewers", "total_viewers"])
-                writer.writerow([timestamp, current, total])
+        if log_to_csv:
+            headers = ["timestamp", "user_name", "gift_name", "gift_count", "gift_value", "fans_club", "pay_grade"]
+            row = [
+                timestamp if self.include_timestamp else "",
+                "viewer_stats",  
+                "viewer_count",  
+                current,      
+                total,       
+                "",              
+                ""               
+            ]
+            self.log_message("gift_log", headers, row)
 
     def _parseFansclubMsg(self, payload):
         '''粉丝团消息'''
