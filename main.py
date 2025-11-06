@@ -6,12 +6,10 @@
 # @Author:      bubu
 # @Project:     douyinLiveWebFetcher
 
-import yaml
 from liveMan import DouyinLiveWebFetcher
 
 if __name__ == '__main__':
-    with open("message_handlers.yml", "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    live_id = config.get("live_id", "default_id")  # fallback if missing
+    live_id = '642367622110'
     room = DouyinLiveWebFetcher(live_id)
+    # room.get_room_status() # 失效
     room.start()
