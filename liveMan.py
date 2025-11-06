@@ -29,6 +29,24 @@ from protobuf.douyin import *
 
 from urllib3.util.url import parse_url
 
+from datetime import datetime
+import csv
+import os
+import yaml
+
+
+def parse_chinese_number(text): #万转成数字
+    try:
+        if isinstance(text, str):
+            if '万' in text:
+                num = float(text.replace('万', '')) * 10000
+            else:
+                num = float(text)
+            return int(num)
+        return int(text)
+    except Exception:
+        return 0
+
 
 def execute_js(js_file: str):
     """
@@ -41,6 +59,10 @@ def execute_js(js_file: str):
     
     ctx = execjs.compile(js_code)
     return ctx
+
+from collections import defaultdict
+
+diamond_totals = defaultdict(lambda: {"name": "", "diamonds": 0})
 
 
 @contextmanager
@@ -105,6 +127,22 @@ def generateMsToken(length=182):
 
 
 class DouyinLiveWebFetcher:
+
+    def load_message_handlers(self, config_path="message_handlers.yml"):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                self.handler_config = yaml.safe_load(f)
+            return {
+                msg_type: getattr(self, cfg["handler"])
+                for msg_type, cfg in self.handler_config.items()
+                if cfg.get("enabled", False)
+            }
+        except Exception as e:
+            print(f"【配置加载失败】{e}")
+            self.handler_config = {}
+            return {}
+
+
     
     def __init__(self, live_id, abogus_file='a_bogus.js'):
         """
@@ -113,6 +151,7 @@ class DouyinLiveWebFetcher:
                         其中的261378947940即是live_id
         """
         self.abogus_file = abogus_file
+        self.total_diamonds = 0
         self.__ttwid = None
         self.__room_id = None
         self.session = requests.Session()
@@ -169,7 +208,8 @@ class DouyinLiveWebFetcher:
         except Exception as err:
             print("【X】Request the live room url error: ", err)
         else:
-            match = re.search(r'roomId\\":\\"(\d+)\\"', response.text)
+            match = re.search(r'"roomId"\s*:\s*"(\d+)"', response.text)
+
             if match is None or len(match.groups()) < 1:
                 print("【X】No match found for roomId")
             
@@ -233,8 +273,11 @@ class DouyinLiveWebFetcher:
             user = data.get('user')
             user_id = user.get('id_str')
             nickname = user.get('nickname')
+
+            self.streamer_name = nickname  
+
             print(f"【{nickname}】[{user_id}]直播间：{['正在直播', '已结束'][bool(room_status)]}.")
-    
+
     def _connectWebSocket(self):
         """
         连接抖音直播间websocket服务器，请求直播间数据
@@ -302,40 +345,32 @@ class DouyinLiveWebFetcher:
         :param ws: websocket实例
         :param message: 数据
         """
-        
-        # 根据proto结构体解析对象
+        # 解析proto结构体
         package = PushFrame().parse(message)
         response = Response().parse(gzip.decompress(package.payload))
-        
-        # 返回直播间服务器链接存活确认消息，便于持续获取数据
+
+        # 返回ack确认消息
         if response.need_ack:
-            ack = PushFrame(log_id=package.log_id,
-                            payload_type='ack',
-                            payload=response.internal_ext.encode('utf-8')
-                            ).SerializeToString()
+            ack = PushFrame(
+                log_id=package.log_id,
+                payload_type='ack',
+                payload=response.internal_ext.encode('utf-8')
+            ).SerializeToString()
             ws.send(ack, websocket.ABNF.OPCODE_BINARY)
-        
-        # 根据消息类别解析消息体
+
+        # 加载消息处理映射
+        dispatch_map = self.load_message_handlers()
+
+        # 分发处理每条消息
         for msg in response.messages_list:
             method = msg.method
-            try:
-                {
-                    'WebcastChatMessage': self._parseChatMsg,  # 聊天消息
-                    'WebcastGiftMessage': self._parseGiftMsg,  # 礼物消息
-                    'WebcastLikeMessage': self._parseLikeMsg,  # 点赞消息
-                    'WebcastMemberMessage': self._parseMemberMsg,  # 进入直播间消息
-                    'WebcastSocialMessage': self._parseSocialMsg,  # 关注消息
-                    'WebcastRoomUserSeqMessage': self._parseRoomUserSeqMsg,  # 直播间统计
-                    'WebcastFansclubMessage': self._parseFansclubMsg,  # 粉丝团消息
-                    'WebcastControlMessage': self._parseControlMsg,  # 直播间状态消息
-                    'WebcastEmojiChatMessage': self._parseEmojiChatMsg,  # 聊天表情包消息
-                    'WebcastRoomStatsMessage': self._parseRoomStatsMsg,  # 直播间统计信息
-                    'WebcastRoomMessage': self._parseRoomMsg,  # 直播间信息
-                    'WebcastRoomRankMessage': self._parseRankMsg,  # 直播间排行榜信息
-                    'WebcastRoomStreamAdaptationMessage': self._parseRoomStreamAdaptationMsg,  # 直播间流配置
-                }.get(method)(msg.payload)
-            except Exception:
-                pass
+            handler = dispatch_map.get(method)
+            if handler:
+                try:
+                    handler(msg.payload)
+                except Exception as e:
+                    print(f"【处理失败】{method}: {e}")
+
     
     def _wsOnError(self, ws, error):
         print("WebSocket error: ", error)
@@ -346,20 +381,59 @@ class DouyinLiveWebFetcher:
     
     def _parseChatMsg(self, payload):
         """聊天消息"""
-        message = ChatMessage().parse(payload)
-        user_name = message.user.nick_name
-        user_id = message.user.id
-        content = message.content
-        print(f"【聊天msg】[{user_id}]{user_name}: {content}")
-    
+        try:
+            message = ChatMessage().parse(payload)
+            user_name = message.user.nick_name
+            user_id = message.user.id
+            content = message.content
+
+            # 解析粉丝团以及财富等级
+            fans_club = None
+            pay_grade = None
+            if message.user:
+                if hasattr(message.user, 'fans_club') and message.user.fans_club and hasattr(message.user.fans_club, 'data') and message.user.fans_club.data:
+                    fans_club = message.user.fans_club.data.level #粉丝团等级
+                if hasattr(message.user, 'pay_grade') and message.user.pay_grade:
+                    pay_grade = message.user.pay_grade.level #财富等级
+            if user_id == 111111: #如果匿名，不显示id
+                print(f"【聊天msg】[{fans_club}] [{pay_grade}]|{user_name}: {content}")
+            else: 
+                print(f"【聊天msg】[{fans_club}] [{pay_grade}]|[{user_id}]{user_name}: {content}")
+            return message
+        except Exception as e:
+            print(f"【聊天msg】解析失败: {e}")
+            return None #如果失败fallback
+
+
     def _parseGiftMsg(self, payload):
         """礼物消息"""
-        message = GiftMessage().parse(payload)
-        user_name = message.user.nick_name
-        gift_name = message.gift.name
-        gift_cnt = message.combo_count
-        print(f"【礼物msg】{user_name} 送出了 {gift_name}x{gift_cnt}")
-    
+        try:
+            message = GiftMessage().parse(payload)
+            user_name = message.user.nick_name
+            gift_name = message.gift.name
+            gift_cnt = message.combo_count
+            gift_value = message.gift.diamond_count * gift_cnt
+
+            fans_club = None
+            pay_grade = None
+            if message.user:
+                if hasattr(message.user, 'fans_club') and message.user.fans_club and hasattr(message.user.fans_club, 'data') and message.user.fans_club.data:
+                    fans_club = message.user.fans_club.data.level
+                if hasattr(message.user, 'pay_grade') and message.user.pay_grade:
+                    pay_grade = message.user.pay_grade.level
+
+            print(f"【礼物msg】[{fans_club}] [{pay_grade}]|{user_name} 送出了 {gift_name}x{gift_cnt} (价值: {gift_value})")
+
+            cfg = self.handler_config.get("WebcastGiftMessage", {})
+            if cfg.get("track_total_diamonds", False):
+                self.total_diamonds += gift_value
+                print(f"💎 当前累计钻石数: {self.total_diamonds}")
+
+            return message
+        except Exception as e:
+            print(f"【礼物msg】解析失败: {e}")
+            return None
+
     def _parseLikeMsg(self, payload):
         '''点赞消息'''
         message = LikeMessage().parse(payload)
@@ -368,12 +442,26 @@ class DouyinLiveWebFetcher:
         print(f"【点赞msg】{user_name} 点了{count}个赞")
     
     def _parseMemberMsg(self, payload):
-        '''进入直播间消息'''
-        message = MemberMessage().parse(payload)
-        user_name = message.user.nick_name
-        user_id = message.user.id
-        gender = ["女", "男"][message.user.gender]
-        print(f"【进场msg】[{user_id}][{gender}]{user_name} 进入了直播间")
+        """进入直播间消息"""
+        try:
+            message = MemberMessage().parse(payload)
+            user_name = message.user.nick_name
+            user_id = message.user.id
+
+            #添加未知性别
+            gender_map = ["女", "男"]
+            gender_index = message.user.gender
+            gender = gender_map[gender_index] if gender_index in [0, 1] else "未知"
+
+            #匿名不显示id
+            if user_id == 111111:
+                print(f"【进场msg】[{gender}]{user_name} 进入了直播间")
+            else:
+                print(f"【进场msg】[{user_id}][{gender}]{user_name} 进入了直播间")
+            return message
+        except Exception as e:
+            print(f"【进场msg】解析失败: {e}")
+            return None
     
     def _parseSocialMsg(self, payload):
         '''关注消息'''
@@ -383,12 +471,34 @@ class DouyinLiveWebFetcher:
         print(f"【关注msg】[{user_id}]{user_name} 关注了主播")
     
     def _parseRoomUserSeqMsg(self, payload):
-        '''直播间统计'''
+        """直播间统计"""
         message = RoomUserSeqMessage().parse(payload)
         current = message.total
-        total = message.total_pv_for_anchor
+        total_raw = message.total_pv_for_anchor
+        total = parse_chinese_number(total_raw)
+
+        now = datetime.now()
+        timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
         print(f"【统计msg】当前观看人数: {current}, 累计观看人数: {total}")
-    
+
+        cfg = self.handler_config.get("WebcastRoomUserSeqMessage", {})
+        interval = cfg.get("log_interval_seconds", 300)
+
+        if hasattr(self, "last_logged_time") and (now - self.last_logged_time).total_seconds() < interval:
+            return
+        self.last_logged_time = now
+
+        if cfg.get("record_viewer_count", False):
+            date_str = now.strftime("%Y-%m-%d")
+            csv_file = f"{date_str}_viewer_count.csv"
+            file_exists = os.path.isfile(csv_file)
+
+            with open(csv_file, mode="a", newline="", encoding="utf-8") as file:
+                writer = csv.writer(file)
+                if not file_exists:
+                    writer.writerow(["timestamp", "current_viewers", "total_viewers"])
+                writer.writerow([timestamp, current, total])
+
     def _parseFansclubMsg(self, payload):
         '''粉丝团消息'''
         message = FansclubMessage().parse(payload)
